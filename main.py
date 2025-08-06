@@ -1,6 +1,23 @@
 import json
 import requests
 import config # 導入我們建立的設定檔
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+app = FastAPI()
+
+# 允许所有来源的CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 在生产环境中应配置为更严格的来源
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def diagnose_video_with_gemini(video_description: str, video_title: str = "untitled.mp4"):
     """
@@ -15,7 +32,9 @@ def diagnose_video_with_gemini(video_description: str, video_title: str = "untit
               如果 API 调用失败，则返回错误信息。
     """
     if not config.API_KEY:
-        return {"error": "GEMINI_API_KEY 未在 config.py 或環境變數中設定。"}
+        # 在伺服器端日誌中打印錯誤，但返回給用戶一個更通用的訊息
+        print("[錯誤] GEMINI_API_KEY 未設定。")
+        raise HTTPException(status_code=500, detail="後端 AI 服務未正确配置。")
 
     # 組合最終的 Prompt，從 config 模組中獲取變數
     final_prompt = f"""
@@ -52,12 +71,17 @@ def diagnose_video_with_gemini(video_description: str, video_title: str = "untit
 
     print("--- 正在向 Gemini API 發送請求... ---")
     try:
-        response = requests.post(config.GEMINI_API_ENDPOINT, headers=headers, data=json.dumps(payload))
+        response = requests.post(config.GEMINI_API_ENDPOINT, headers=headers, data=json.dumps(payload), timeout=60)
         response.raise_for_status()  # 如果請求失敗 (如 4xx 或 5xx)，則拋出異常
 
         response_json = response.json()
         
         # 提取 Gemini 生成的核心報告內容
+        # 增加更安全的访问方式
+        if not response_json.get('candidates'):
+             print(f"[錯誤] API 回應中缺少 'candidates' 欄位。回應: {response_json}")
+             raise HTTPException(status_code=500, detail="從 AI 服務收到的回應格式不正確。")
+
         report_text = response_json['candidates'][0]['content']['parts'][0]['text']
         report_data = json.loads(report_text)
 
@@ -74,41 +98,82 @@ def diagnose_video_with_gemini(video_description: str, video_title: str = "untit
 
     except requests.exceptions.RequestException as e:
         print(f"[錯誤] API 請求失敗: {e}")
-        return {"error": f"API 請求失敗: {e}", "details": response.text if 'response' in locals() else "No response"}
+        # 如果有回應內容，也一併打印出來
+        error_details = e.response.text if e.response else "No response from server."
+        print(f"Server response: {error_details}")
+        raise HTTPException(status_code=502, detail=f"AI 服務請求失敗: {e}")
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         print(f"[錯誤] 解析 API 回應失敗: {e}")
-        return {"error": f"解析 API 回應失敗: {e}", "response_body": response_json if 'response_json' in locals() else "No JSON response"}
+        # 附上收到的原始 body 以便 debug
+        response_body = response.text if 'response' in locals() and response.text else "No response body."
+        print(f"Raw response body: {response_body}")
+        raise HTTPException(status_code=500, detail=f"解析 AI 服務回應時出錯: {e}")
 
 
-# ==============================================================================
-# 執行範例
-# 這部分模擬了後端服務器接收到一個請求後的處理過程。
-# ==============================================================================
-if __name__ == "__main__":
-    # 模擬用戶上傳的影片，我們將其轉換為詳細的文字描述
-    # 這一步在真實應用中可能由另一個多模態模型完成，或要求用戶手動輸入
-    zelda_video_description = """
-    这是一个典型的第一人称视角（POV）游戏实况片段，时长约20秒。
-    记录了玩家在《塞尔达传说：王国之泪》中一个精彩的战斗瞬间。
-    视频内容如下：
-    0-6秒：主角（林克）站在一个高台上，下方有多个魔像敌人。所有敌人都用激光瞄准主角，发出“滴滴”的警报声，气氛紧张，危机四伏。
-    7-12秒：玩家触发了“林克时间”（子弹时间），周围一切变慢。玩家冷静地打开武器选择轮盘，选择了“炸弹花”和箭矢进行组合。
-    12-14秒：玩家瞄准下方的敌人中心，射出带有炸弹花的关键一箭。
-    14-15秒：炸弹在敌人中心引发巨大爆炸，瞬间清空了所有敌人。
-    15-20秒：危机解除，主角从高台跳下，平稳落地，展示战果。
-    整个视频没有剪辑，没有额外配音或字幕，使用的是游戏内原生的画面和音效。
+@app.post("/diagnose")
+async def diagnose_endpoint(request: dict):
     """
+    API 端點，接收前端請求，調用診斷函式並返回結果。
+    """
+    file_name = request.get("fileName")
+    if not file_name:
+        raise HTTPException(status_code=400, detail="請求中未包含 'fileName'。")
 
-    print("正在為 'zelda_game_clip.mp4' 開始影片診斷...")
+    # TODO: 這是一個臨時的橋接方案。
+    # 理想情況下，前端應上傳影片，後端再將影片轉為文字描述。
+    # 現在，我們先用檔名來判斷並使用硬編碼的描述。
+    if 'zelda' in file_name.lower():
+        video_description = """
+        这是一个典型的第一人称视角（POV）游戏实况片段，时长约20秒。
+        记录了玩家在《塞尔达传说：王国之泪》中一个精彩的战斗瞬间。
+        视频内容如下：
+        0-6秒：主角（林克）站在一个高台上，下方有多个魔像敌人。所有敌人都用激光瞄准主角，发出“滴滴”的警报声，气氛紧张，危机四伏。
+        7-12秒：玩家触发了“林克时间”（子弹时间），周围一切变慢。玩家冷静地打开武器选择轮盘，选择了“炸弹花”和箭矢进行组合。
+        12-14秒：玩家瞄准下方的敌人中心，射出带有炸弹花的关键一箭。
+        14-15秒：炸弹在敌人中心引发巨大爆炸，瞬间清空了所有敌人。
+        15-20秒：危机解除，主角从高台跳下，平稳落地，展示战果。
+        整个视频没有剪辑，没有额外配音或字幕，使用的是游戏内原生的画面和音效。
+        """
+        video_title = "zelda_game_clip.mp4"
+    else:
+        # 對於其他影片，返回一個預設的或錯誤的訊息
+        # 或者可以提供一個預設的描述來觸發分析
+        raise HTTPException(status_code=404, detail="目前僅支持 'zelda' 影片的分析。")
+
+    print(f"正在為 '{video_title}' 開始影片診斷...")
     
-    # 調用主函數，獲取診斷報告
-    # 這一步相當於後端 API Endpoint 的核心邏輯
     diagnostic_report = diagnose_video_with_gemini(
-        video_description=zelda_video_description,
-        video_title="zelda_game_clip.mp4"
+        video_description=video_description,
+        video_title=video_title
     )
 
-    # 打印最終的 JSON 結果，這個結果將被發送給前端
-    print("\n--- 將發送至前端的最終 JSON 報告 ---")
-    print(json.dumps(diagnostic_report, indent=2, ensure_ascii=False))
+    return diagnostic_report
+
+# 静态文件服务
+app.mount("/static", StaticFiles(directory="public"), name="static")
+
+@app.get("/")
+async def read_index():
+    return FileResponse('public/index.html')
+
+@app.get("/{catchall:path}")
+async def read_other_files(catchall: str):
+    # 尝试从 public 目录中提供文件
+    file_path = f"public/{catchall}"
+    if ".." in file_path or file_path.startswith('/'):
+        # 安全性检查，防止路径遍历攻击
+        return FileResponse('public/index.html')
+    
+    # 检查文件是否存在，如果存在则返回，否则返回 index.html
+    import os
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return FileResponse(file_path)
+        
+    return FileResponse('public/index.html')
+
+
+if __name__ == "__main__":
+    print("--- 啟動後端伺服器 ---")
+    print("請在瀏覽器中打開前端頁面: http://0.0.0.0:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
