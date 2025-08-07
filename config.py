@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+# 在程式啟動時自動載入 .env 檔案中的環境變數
+load_dotenv()
 
 # --- 1. API 金鑰與端點設定 ---
 # 建議將金鑰儲存在環境變數中，以提高安全性。

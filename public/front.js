@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+const { useState, useCallback } = React;
 
 // ==============================================================================
 // 模擬後端 API 服務 (此部分將被真實 API 調用取代)
@@ -203,7 +203,7 @@ const ReportView = ({ onReset, reportData }) => {
 
 
 // Main App Component
-export default function App() {
+function App() {
     const [view, setView] = useState('upload'); // 'upload', 'analysis', 'report'
     const [selectedFile, setSelectedFile] = useState(null);
     const [reportData, setReportData] = useState(null);
@@ -292,3 +292,6 @@ export default function App() {
         </div>
     );
 }
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
