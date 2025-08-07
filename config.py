@@ -13,32 +13,21 @@ if not API_KEY:
     # 您也可以在此處臨時填寫金鑰進行測試，但不建議在生產環境中使用。
     # API_KEY = "YOUR_GEMINI_API_KEY_HERE"
     
-GEMINI_API_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
+# --- The 'GEMINI_API_ENDPOINT' variable is no longer needed and will be removed. ---
 
-# --- 2. AI 角色與任務指令 (Prompt) ---
+# --- 2. AI 角色与任务指令 (Prompt) ---
+# 将模型名称更新为 gemini-2.5-pro
+MODEL_NAME = "gemini-2.5-pro"
 SYSTEM_PROMPT = """
-角色：你是一个专业的短剧切片评估人员，评估切片视频是否有爆火的能力。
-任务：文档是你抽象出来的评估表，需要你结合评估表，分析并评估当前视频的实际综合素质，并给出优缺点及优化建议。
-要求：需要审慎、严格地评估，若评估结果较好，但实际播放效果不理想，我们将取消你的评估资质。
+角色：你是一个专业的短剧切片评估人员，负责评估用户上传的短剧视频切片是否具有成为爆款的潜力。
+任务：你将直接接收一个视频文件。请结合下方的 [评估表] ，对这个视频进行全面、严格的分析，评估其综合素质，并给出具体的优缺点及可操作的优化建议。
+核心要求：你的评估必须审慎、严谨。如果一个视频经你评估为“潜力巨大”但最终市场反响平平，你的评估资格将被重新审核。我们追求的是真实、有价值的洞察，而非泛泛的赞美。
 
-目的与目标：
-帮助用户评估其短剧切片视频的爆火潜力。
-提供客观、专业的评估，涵盖视频的各个方面。
-给出具体、可操作的优化建议，以提高视频的吸引力与传播效果。
-
-行为与规则：
-1. 评估流程:
-   a) 我将提供一个视频的详细文字描述。
-   b) 你必须严格根据下方提供的 [评估表] 对视频进行全面分析。
-   c) 评估维度包括故事冲突、节奏感、人物塑造、剪辑手法、音效与配乐、标题与封面设计。
-   d) 你需要在我指定的JSON结构中，提供详细的评分和文字分析。
-2. 评估结果呈现:
-   a) 在JSON中明确列出视频的优点和缺点。
-   b) 给出针对性的、可执行的优化建议。
-3. 语气与态度:
-   a) 保持专业、审慎、严谨的评估态度。
-   b) 语言客观、中立，避免使用主观色彩过强的词汇。
-   c) 在给出负面评价时，应以建设性的优化建议作为补充。
+行为与规则:
+1.  **输入处理**：我将直接提供一个视频文件给你进行分析，而不是文字描述。
+2.  **评估框架**：必须严格遵循 [评估表] 中定义的维度和权重进行分析。
+3.  **输出格式**：分析结果必须严格按照我提供的 JSON 结构进行组织和返回。
+4.  **专业态度**：保持专业、客观、严谨的评估风格。在指出问题时，务必提供建设性的、可执行的修改方案。
 """
 
 # --- 3. 評估量表 ---
@@ -88,7 +77,7 @@ JSON_RESPONSE_SCHEMA = {
         "detailedAnalysis": {
             "type": "OBJECT",
             "properties": {
-                "title": {"type": "STRING", "default": "详细视频分析"},
+                "title": {"type": "STRING", "description": "该部分的标题，例如 '详细视频分析'"},
                 "sections": {
                     "type": "ARRAY",
                     "items": {
@@ -104,7 +93,7 @@ JSON_RESPONSE_SCHEMA = {
         "overallReview": {
             "type": "OBJECT",
             "properties": {
-                "title": {"type": "STRING", "default": "综合评价与优化建议"},
+                "title": {"type": "STRING", "description": "该部分的标题，例如 '综合评价与优化建议'"},
                 "pros": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "优点列表"},
                 "cons": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "缺点列表"},
                 "optimizationDirections": {
@@ -122,7 +111,7 @@ JSON_RESPONSE_SCHEMA = {
         "optimizedScripts": {
             "type": "OBJECT",
             "properties": {
-                "title": {"type": "STRING", "default": "优化后的脚本方案"},
+                "title": {"type": "STRING", "description": "该部分的标题，例如 '优化后的脚本方案'"},
                 "scripts": {
                     "type": "ARRAY",
                     "items": {

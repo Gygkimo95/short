@@ -226,15 +226,26 @@ function App() {
         setError(null);
         
         try {
+            // 1. 创建一个 FormData 对象
+            // 这是在网页中上传文件的标准方式。
+            const formData = new FormData();
+            
+            // 2. 将视频文件追加到 FormData 中
+            // 第一个参数 "video" 是一个键名，必须与后端 FastAPI 接口中 `File(...)` 的参数名一致。
+            // 第二个参数是文件对象，第三个是文件名。
+            formData.append('video', selectedFile, selectedFile.name);
+
+            // 3. 发送 FormData 到后端
+            // 注意：当使用 FormData 时，浏览器会自动设置正确的 'Content-Type' (multipart/form-data)，
+            // 所以我们不再需要在 headers 中手动设置它。
             const response = await fetch('http://127.0.0.1:8000/diagnose', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fileName: selectedFile.name }),
+                body: formData, // 直接将 formData 作为 body
             });
 
             if (!response.ok) {
-                const errData = await response.json().catch(() => ({ detail: `伺服器錯誤，狀態碼: ${response.status}` }));
-                throw new Error(errData.detail || '分析時發生未知錯誤');
+                const errData = await response.json().catch(() => ({ detail: `服务器错误，状态码: ${response.status}` }));
+                throw new Error(errData.detail || '分析时发生未知错误');
             }
 
             const data = await response.json();

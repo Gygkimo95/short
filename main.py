@@ -1,7 +1,9 @@
 import json
-import requests
-import config # 導入我們建立的設定檔
-from fastapi import FastAPI, HTTPException
+import asyncio
+import google.generativeai as genai
+import config  # 导入我们建立的配置文件
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi.staticfiles import StaticFiles
@@ -18,130 +20,131 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Google AI SDK 初始化 ---
+# 在应用启动时配置好SDK
+if not config.API_KEY:
+    print("错误：未在环境变量中找到 GEMINI_API_KEY。服务将无法处理AI请求。")
+    # 在这种情况下，让应用启动，但后续的AI调用会失败
+else:
+    genai.configure(api_key=config.API_KEY)
 
-def diagnose_video_with_gemini(video_description: str, video_title: str = "untitled.mp4"):
+
+async def diagnose_video_with_gemini(video_file: UploadFile):
     """
-    接收影片描述，調用 Gemini API 執行完整的診斷流程並返回 JSON 報告。
+    接收上传的视频文件，调用 Gemini API 执行完整的诊断流程并返回 JSON 报告。
 
     Args:
-        video_description (str): 对用户上传视频的详细文字描述。
-        video_title (str): 视频的文件名。
+        video_file (UploadFile): 用户上传的视频文件对象。
 
     Returns:
         dict: 包含完整诊断报告的 Python 字典。
-              如果 API 调用失败，则返回错误信息。
+              如果 API 调用失败，则会引发 HTTPException。
     """
     if not config.API_KEY:
-        # 在伺服器端日誌中打印錯誤，但返回給用戶一個更通用的訊息
-        print("[錯誤] GEMINI_API_KEY 未設定。")
-        raise HTTPException(status_code=500, detail="後端 AI 服務未正确配置。")
+        raise HTTPException(status_code=500, detail="后端 AI 服务未正确配置 API 密钥。")
 
-    # 組合最終的 Prompt，從 config 模組中獲取變數
-    final_prompt = f"""
+    # 我们不再需要手动读取字节。 video_title 的获取保持不变。
+    video_title = video_file.filename or "untitled.mp4"
+    
+    print(f"--- 正在上传视频 '{video_title}' 到 Google AI... ---")
+    
+    try:
+        # 1. 上传文件到 Google AI
+        # 修正：直接将 FastAPI 的文件对象 (video_file) 传递给 SDK。
+        # SDK 能够处理这种文件流对象。
+        # 同时，明确提供 mime_type 以获得最佳效果。
+        print(f"Uploading file '{video_title}' with mime_type: {video_file.content_type}")
+        video_file_gai = genai.upload_file(
+            path=video_file.file, # <--- 关键修正
+            display_name=f"short-video-diag-{video_title}",
+            mime_type=video_file.content_type
+        )
+        
+        # 轮询文件状态，直到它准备好或失败
+        while video_file_gai.state.name == "PROCESSING":
+            print("视频正在处理中，请稍候...")
+            await asyncio.sleep(5) # 使用异步sleep
+            video_file_gai = genai.get_file(video_file_gai.name)
+
+        if video_file_gai.state.name == "FAILED":
+            print(f"[错误] Google AI 文件处理失败: {video_file_gai.state}")
+            raise HTTPException(status_code=500, detail="AI 服务无法处理上传的视频文件。")
+
+        print(f"--- 视频上传成功，文件名为: {video_file_gai.name} ---")
+
+        # 2. 准备 Prompt 和模型配置
+        # 将所有文字指令合并成一个大的 prompt 字符串
+        full_prompt_text = f"""
 {config.SYSTEM_PROMPT}
 
 {config.EVALUATION_SHEET}
 
 ---
-现在，请根据上述规则和评估表，对以下视频内容进行分析。
-
-[视频内容描述]
-{video_description}
-[视频内容描述结束]
-
-请严格按照我指定的 JSON 格式输出你的分析结果，不要有任何额外的文字或解释。
+现在，请根据上述规则和评估表，对这个视频文件进行全面分析。请严格按照我指定的 JSON 格式输出你的分析结果。
 """
-
-    # 構造 API 請求體
-    payload = {
-        "contents": [
-            {
-                "parts": [{"text": final_prompt}]
-            }
-        ],
-        "generationConfig": {
-            "response_mime_type": "application/json",
-            "response_schema": config.JSON_RESPONSE_SCHEMA
-        }
-    }
-
-    headers = {
-        "Content-Type": "application/json"
-    }
-
-    print("--- 正在向 Gemini API 發送請求... ---")
-    try:
-        response = requests.post(config.GEMINI_API_ENDPOINT, headers=headers, data=json.dumps(payload), timeout=60)
-        response.raise_for_status()  # 如果請求失敗 (如 4xx 或 5xx)，則拋出異常
-
-        response_json = response.json()
         
-        # 提取 Gemini 生成的核心報告內容
-        # 增加更安全的访问方式
-        if not response_json.get('candidates'):
-             print(f"[錯誤] API 回應中缺少 'candidates' 欄位。回應: {response_json}")
-             raise HTTPException(status_code=500, detail="從 AI 服務收到的回應格式不正確。")
-
-        report_text = response_json['candidates'][0]['content']['parts'][0]['text']
+        # 构造一个包含文本和视频的 list，作为 `contents` 参数
+        # 这与 curl 示例中的 `parts` 数组概念上是对应的
+        # SDK 会自动处理这个 list，将其转换为正确的 API 请求格式
+        prompt_parts = [full_prompt_text, video_file_gai]
+        
+        model = genai.GenerativeModel(
+            model_name=config.MODEL_NAME,
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": config.JSON_RESPONSE_SCHEMA
+            }
+        )
+        
+        # 3. 调用模型进行分析
+        print("--- 正在向 Gemini Pro 1.5 发送分析请求... ---")
+        response = await model.generate_content_async(prompt_parts)
+        
+        # 提取并解析报告
+        report_text = response.text
         report_data = json.loads(report_text)
-
-        # 組合最終返回給前端的完整數據
+        
         final_report = {
-            "reportId": f"diag_report_{hash(video_description)}",
+            "reportId": f"diag_report_{hash(video_title)}",
             "videoTitle": video_title,
-            "aiModelVersion": "ShortFormVideo_Assessor_V3.1_Gemini",
+            "aiModelVersion": f"ShortFormVideo_Assessor_Gemini_{config.MODEL_NAME}",
             **report_data
         }
-        
-        print("--- 成功從 Gemini API 接收並解析報告。 ---")
+
+        print("--- 成功从 Gemini API 接收并解析报告。 ---")
         return final_report
 
-    except requests.exceptions.RequestException as e:
-        print(f"[錯誤] API 請求失敗: {e}")
-        # 如果有回應內容，也一併打印出來
-        error_details = e.response.text if e.response else "No response from server."
-        print(f"Server response: {error_details}")
-        raise HTTPException(status_code=502, detail=f"AI 服務請求失敗: {e}")
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        print(f"[錯誤] 解析 API 回應失敗: {e}")
-        # 附上收到的原始 body 以便 debug
-        response_body = response.text if 'response' in locals() and response.text else "No response body."
-        print(f"Raw response body: {response_body}")
-        raise HTTPException(status_code=500, detail=f"解析 AI 服務回應時出錯: {e}")
+    except Exception as e:
+        # 统一的异常处理
+        print(f"[严重错误] 在处理视频或调用AI时发生未知错误: {e}")
+        # 增加更详细的错误日志
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"处理视频时发生内部错误: {str(e)}")
+
+    finally:
+        # 4. 清理资源：无论成功与否，都尝试删除上传的文件
+        if 'video_file_gai' in locals() and video_file_gai:
+            try:
+                print(f"--- 正在从 Google AI 删除临时文件: {video_file_gai.name} ---")
+                await genai.delete_file_async(video_file_gai.name)
+                print("--- 临时文件删除成功。 ---")
+            except Exception as e:
+                # 如果删除失败，只记录日志，不影响给用户的返回结果
+                print(f"[警告] 删除 Google AI 上的临时文件失败: {e}")
 
 
 @app.post("/diagnose")
-async def diagnose_endpoint(request: dict):
+async def diagnose_endpoint(video: UploadFile = File(...)):
     """
-    API 端點，接收前端請求，調用診斷函式並返回結果。
+    API 端点，接收前端上传的视频文件，调用诊断函数并返回结果。
     """
-    file_name = request.get("fileName")
-    if not file_name:
-        raise HTTPException(status_code=400, detail="請求中未包含 'fileName'。")
+    if not video.content_type.startswith('video/'):
+        raise HTTPException(status_code=400, detail="上传的文件不是有效的视频格式。")
 
-    # 注意：这是一个临时桥接方案。
-    # 目前，无论上传什么视频，后端都会使用一个固定的视频描述来进行AI分析。
-    # 这是为了方便测试端到端的流程。
-    video_description = """
-    这是一个典型的第一人称视角（POV）游戏实况片段，时长约20秒。
-    记录了玩家在《塞尔达传说：王国之泪》中一个精彩的战斗瞬间。
-    视频内容如下：
-    0-6秒：主角（林克）站在一个高台上，下方有多个魔像敌人。所有敌人都用激光瞄准主角，发出“滴滴”的警报声，气氛紧张，危机四伏。
-    7-12秒：玩家触发了“林克时间”（子弹时间），周围一切变慢。玩家冷静地打开武器选择轮盘，选择了“炸弹花”和箭矢进行组合。
-    12-14秒：玩家瞄准下方的敌人中心，射出带有炸弹花的关键一箭。
-    14-15秒：炸弹在敌人中心引发巨大爆炸，瞬间清空了所有敌人。
-    15-20秒：危机解除，主角从高台跳下，平稳落地，展示战果。
-    整个视频没有剪辑，没有额外配音或字幕，使用的是游戏内原生的画面和音效。
-    """
-    # 使用前端传来的真实文件名
-    video_title = file_name
-
-    print(f"正在為 '{video_title}' 開始影片診斷 (使用預設描述)...")
+    print(f"接收到上传文件: {video.filename}, 类型: {video.content_type}")
     
-    diagnostic_report = diagnose_video_with_gemini(
-        video_description=video_description,
-        video_title=video_title
-    )
+    diagnostic_report = await diagnose_video_with_gemini(video)
 
     return diagnostic_report
 
@@ -169,7 +172,7 @@ async def read_other_files(catchall: str):
 
 
 if __name__ == "__main__":
-    print("--- 啟動後端伺服器 ---")
-    print("請在瀏覽器中打開前端頁面: http://0.0.0.0:8000")
+    print("--- 启动后端服务器 ---")
+    print("请在浏览器中打开前端页面: http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
