@@ -7,6 +7,8 @@ import os # 导入 os 模块
 import re
 import unicodedata
 import base64, binascii
+import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +17,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 app = FastAPI()
+
+# 调试总开关与日志目录
+DEBUG_GEMINI = True  # 生产环境可改为 False，或用环境变量控制
+LOG_DIR = Path(os.getenv("GEMINI_LOG_DIR", "/opt/short/logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 允许所有来源的CORS
 app.add_middleware(
@@ -99,6 +106,63 @@ def _parse_model_json(s: str):
     return json.loads(cleaned)
 
 
+def _debug_print_response_structure(resp):
+    if not DEBUG_GEMINI: return
+    try:
+        cands = getattr(resp, "candidates", []) or []
+        print(f"[DEBUG] candidates={len(cands)}")
+        for ci, cand in enumerate(cands):
+            content = getattr(cand, "content", None)
+            parts = getattr(content, "parts", []) if content else []
+            print(f"[DEBUG] - cand[{ci}] parts={len(parts)}")
+            for pi, p in enumerate(parts):
+                if hasattr(p, "text") and p.text:
+                    preview = p.text.replace("\n","\\n")[:200]
+                    print(f"[DEBUG]   - part[{pi}] type=text len={len(p.text)} preview={preview}")
+                elif hasattr(p, "inline_data") and p.inline_data:
+                    mt = getattr(p.inline_data, "mime_type", "")
+                    data = getattr(p.inline_data, "data", b"")
+                    size = len(data) if isinstance(data, (bytes, bytearray)) else len(str(data))
+                    print(f"[DEBUG]   - part[{pi}] type=inline_data mime={mt} size={size}")
+                elif hasattr(p, "file_data") and p.file_data:
+                    print(f"[DEBUG]   - part[{pi}] type=file_data uri={getattr(p.file_data,'file_uri','')}")
+                else:
+                    print(f"[DEBUG]   - part[{pi}] type=unknown")
+    except Exception as e:
+        print(f"[DEBUG] inspect response failed: {e}")
+
+def _debug_dump_response(resp):
+    if not DEBUG_GEMINI: return
+    try:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = LOG_DIR / f"gemini_raw_{ts}.json"
+        payload = {"candidates": []}
+        for cand in getattr(resp, "candidates", []) or []:
+            c = {"parts": []}
+            parts = getattr(getattr(cand,"content",None),"parts",[]) or []
+            for p in parts:
+                if hasattr(p, "text") and p.text:
+                    c["parts"].append({"type": "text", "text": p.text})
+                elif hasattr(p, "inline_data") and p.inline_data:
+                    mt = getattr(p.inline_data, "mime_type", "")
+                    data = getattr(p.inline_data, "data", b"")
+                    if isinstance(data, (bytes, bytearray)):
+                        preview = base64.b64encode(data[:1024]).decode("utf-8")
+                        c["parts"].append({"type":"inline_data","mime_type":mt,"data_base64_preview":preview,"note":"first 1KB"})
+                    else:
+                        c["parts"].append({"type":"inline_data","mime_type":mt,"data_preview":str(data)[:1024]})
+                elif hasattr(p, "file_data") and p.file_data:
+                    c["parts"].append({"type":"file_data","file_uri":getattr(p.file_data,"file_uri","")})
+                else:
+                    c["parts"].append({"type":"unknown"})
+            payload["candidates"].append(c)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"[DEBUG] full response dumped to: {path}")
+    except Exception as e:
+        print(f"[DEBUG] dump response failed: {e}")
+
+
 async def diagnose_video_with_gemini(video_file: UploadFile):
     """
     接收上传的视频文件，调用 Gemini API 执行完整的诊断流程并返回 JSON 报告。
@@ -157,20 +221,24 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
         
         prompt_parts = [full_prompt_text, video_file_gai]
         
+        USE_RESPONSE_SCHEMA = True
         model = genai.GenerativeModel(
             model_name=config.MODEL_NAME,
             generation_config={
                 "max_output_tokens": 8192,
-                "temperature": 0,  # 收敛输出，减少格式噪声
+                "temperature": 0,
                 "response_mime_type": "application/json",
-                "response_schema": config.JSON_RESPONSE_SCHEMA
+                **({"response_schema": config.JSON_RESPONSE_SCHEMA} if USE_RESPONSE_SCHEMA else {})
             }
         )
         
         # 4. 调用模型
         print("--- 正在向 Gemini Flash 发送分析请求... ---")
         response = await model.generate_content_async(prompt_parts)
-        
+
+        _debug_print_response_structure(response)
+        _debug_dump_response(response)
+
         report_data = _extract_json_from_response(response)
         if report_data is None:
             report_text = response.text
