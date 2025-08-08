@@ -2,6 +2,11 @@ import json
 import asyncio
 import google.generativeai as genai
 import config  # 导入我们建立的配置文件
+import tempfile # 导入 tempfile 模块
+import os # 导入 os 模块
+import re
+import unicodedata
+import base64, binascii
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +34,71 @@ else:
     genai.configure(api_key=config.API_KEY)
 
 
+def _extract_json_from_response(resp):
+    try:
+        for cand in getattr(resp, "candidates", []):
+            content = getattr(cand, "content", None)
+            parts = getattr(content, "parts", []) if content else []
+            for p in parts:
+                inline = getattr(p, "inline_data", None)
+                if inline and getattr(inline, "mime_type", "") == "application/json":
+                    data = getattr(inline, "data", b"")
+                    if isinstance(data, (bytes, bytearray)):
+                        return json.loads(data.decode("utf-8", "ignore"))
+                    try:
+                        return json.loads(base64.b64decode(data).decode("utf-8", "ignore"))
+                    except Exception:
+                        return json.loads(str(data))
+    except Exception:
+        pass
+    return None
+
+
+def _parse_model_json(s: str):
+    s = s.lstrip("\ufeff")
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
+    s = s.replace("```json", "```").replace("```", "")
+    # 括号平衡扫描，提取第一个完整 JSON 对象
+    in_str = False; esc = False; depth = 0; start = None; frag = None
+    for i, ch in enumerate(s):
+        if esc: esc = False; continue
+        if ch == '\\': esc = True; continue
+        if ch == '"': in_str = not in_str; continue
+        if in_str: continue
+        if ch == '{':
+            if depth == 0: start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    frag = s[start:i+1]; break
+    if not frag:
+        i = s.find('{')
+        if i == -1:
+            raise HTTPException(status_code=500, detail="AI返回的数据缺少有效JSON包裹")
+        # 若缺失末尾括号，尽力补齐
+        in_str = False; esc = False; depth = 0
+        for ch in s[i:]:
+            if esc: esc = False
+            elif ch == '\\': esc = True
+            elif ch == '"': in_str = not in_str
+            elif not in_str:
+                if ch == '{': depth += 1
+                elif ch == '}': depth = max(0, depth-1)
+        frag = s[i:] + ('}' * depth)
+    # 把字符串内部的裸换行转义
+    out=[]; in_str=False; esc=False
+    for ch in frag:
+        if esc: out.append(ch); esc=False
+        elif ch == '\\': out.append(ch); esc=True
+        elif ch == '"': out.append(ch); in_str = not in_str
+        elif ch in '\r\n' and in_str: out.append('\\n')
+        else: out.append(ch)
+    cleaned = ''.join(out).strip()
+    return json.loads(cleaned)
+
+
 async def diagnose_video_with_gemini(video_file: UploadFile):
     """
     接收上传的视频文件，调用 Gemini API 执行完整的诊断流程并返回 JSON 报告。
@@ -43,27 +113,30 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
     if not config.API_KEY:
         raise HTTPException(status_code=500, detail="后端 AI 服务未正确配置 API 密钥。")
 
-    # 我们不再需要手动读取字节。 video_title 的获取保持不变。
-    video_title = video_file.filename or "untitled.mp4"
-    
-    print(f"--- 正在上传视频 '{video_title}' 到 Google AI... ---")
-    
+    local_tmp_path = None
+    video_file_gai = None # 预先定义
     try:
-        # 1. 上传文件到 Google AI
-        # 修正：直接将 FastAPI 的文件对象 (video_file) 传递给 SDK。
-        # SDK 能够处理这种文件流对象。
-        # 同时，明确提供 mime_type 以获得最佳效果。
-        print(f"Uploading file '{video_title}' with mime_type: {video_file.content_type}")
+        # 1. 将上传的文件保存到本地临时文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(video_file.filename)[1]) as tmp:
+            content = await video_file.read()
+            tmp.write(content)
+            local_tmp_path = tmp.name
+        
+        video_title = video_file.filename or "untitled.mp4"
+        print(f"视频已保存到本地临时文件: {local_tmp_path}")
+        print(f"--- 正在上传视频 '{video_title}' 到 Google AI... ---")
+        
+        # 2. 从临时文件路径上传文件
         video_file_gai = genai.upload_file(
-            path=video_file.file, # <--- 关键修正
+            path=local_tmp_path,
             display_name=f"short-video-diag-{video_title}",
             mime_type=video_file.content_type
         )
         
-        # 轮询文件状态，直到它准备好或失败
+        # 轮询文件状态
         while video_file_gai.state.name == "PROCESSING":
             print("视频正在处理中，请稍候...")
-            await asyncio.sleep(5) # 使用异步sleep
+            await asyncio.sleep(5)
             video_file_gai = genai.get_file(video_file_gai.name)
 
         if video_file_gai.state.name == "FAILED":
@@ -72,8 +145,7 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
 
         print(f"--- 视频上传成功，文件名为: {video_file_gai.name} ---")
 
-        # 2. 准备 Prompt 和模型配置
-        # 将所有文字指令合并成一个大的 prompt 字符串
+        # 3. 准备 Prompt 和模型配置
         full_prompt_text = f"""
 {config.SYSTEM_PROMPT}
 
@@ -83,26 +155,33 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
 现在，请根据上述规则和评估表，对这个视频文件进行全面分析。请严格按照我指定的 JSON 格式输出你的分析结果。
 """
         
-        # 构造一个包含文本和视频的 list，作为 `contents` 参数
-        # 这与 curl 示例中的 `parts` 数组概念上是对应的
-        # SDK 会自动处理这个 list，将其转换为正确的 API 请求格式
         prompt_parts = [full_prompt_text, video_file_gai]
         
         model = genai.GenerativeModel(
             model_name=config.MODEL_NAME,
             generation_config={
+                "max_output_tokens": 8192,
+                "temperature": 0,  # 收敛输出，减少格式噪声
                 "response_mime_type": "application/json",
                 "response_schema": config.JSON_RESPONSE_SCHEMA
             }
         )
         
-        # 3. 调用模型进行分析
-        print("--- 正在向 Gemini Pro 1.5 发送分析请求... ---")
+        # 4. 调用模型
+        print("--- 正在向 Gemini Flash 发送分析请求... ---")
         response = await model.generate_content_async(prompt_parts)
         
-        # 提取并解析报告
-        report_text = response.text
-        report_data = json.loads(report_text)
+        report_data = _extract_json_from_response(response)
+        if report_data is None:
+            report_text = response.text
+            print("=== AI 返回的原始文本(截断) ===")
+            print(report_text[:4000])
+            print("=== 原始文本结束 ===")
+            report_data = _parse_model_json(report_text)
+        
+        print("=== 解析后的 JSON 数据结构 ===")
+        print(json.dumps(report_data, indent=2, ensure_ascii=False))
+        print("=== JSON 数据结构结束 ===")
         
         final_report = {
             "reportId": f"diag_report_{hash(video_title)}",
@@ -115,23 +194,26 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
         return final_report
 
     except Exception as e:
-        # 统一的异常处理
         print(f"[严重错误] 在处理视频或调用AI时发生未知错误: {e}")
-        # 增加更详细的错误日志
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"处理视频时发生内部错误: {str(e)}")
 
     finally:
-        # 4. 清理资源：无论成功与否，都尝试删除上传的文件
-        if 'video_file_gai' in locals() and video_file_gai:
+        # 5. 清理资源
+        # 清理 Google AI 上的文件
+        if video_file_gai:
             try:
                 print(f"--- 正在从 Google AI 删除临时文件: {video_file_gai.name} ---")
-                await genai.delete_file_async(video_file_gai.name)
-                print("--- 临时文件删除成功。 ---")
+                genai.delete_file(video_file_gai.name)
+                print("--- Google AI 临时文件删除成功。 ---")
             except Exception as e:
-                # 如果删除失败，只记录日志，不影响给用户的返回结果
                 print(f"[警告] 删除 Google AI 上的临时文件失败: {e}")
+        
+        # 清理本地的临时文件
+        if local_tmp_path and os.path.exists(local_tmp_path):
+            os.remove(local_tmp_path)
+            print(f"--- 本地临时文件删除成功: {local_tmp_path} ---")
 
 
 @app.post("/diagnose")

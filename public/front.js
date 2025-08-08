@@ -118,13 +118,23 @@ const getPriorityClass = (priority = "") => {
 const ReportView = ({ onReset, reportData }) => {
     if (!reportData) return null;
 
-    const { 
+    let { 
         overallScore, 
-        conclusion, 
+        conclusion, // This might be undefined
         detailedAnalysis, 
         overallReview, 
-        optimizedScripts 
+        optimizedScripts,
+        potentialLevel, // <-- 新增，用于备用
+        potentialLevelText // <-- 新增，用于备用
     } = reportData;
+
+    // 如果AI返回的数据没有 conclusion 对象，我们手动构建一个
+    if (!conclusion && potentialLevel && potentialLevelText) {
+        conclusion = {
+            title: potentialLevel,
+            description: potentialLevelText
+        };
+    }
 
     const scoreClass = getScoreClass(overallScore);
 
