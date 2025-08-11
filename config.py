@@ -52,6 +52,27 @@ SYSTEM_PROMPT = """
         "direction": "具体优化建议"
       }
     ]
+  },
+  "ranking": 数字(0-100),
+  "radarData": {
+    "labels": [
+        "黄金开局吸引力",
+        "剧情节奏与爽点密度",
+        "情绪价值与角色共鸣",
+        "传播分享驱动力",
+        "基础制作质量",
+        "市场竞争力与传播辨识度"
+    ],
+    "datasets": [
+      {
+        "label": "您的视频",
+        "data": [数字(0-100), 数字(0-100), 数字(0-100), 数字(0-100), 数字(0-100), 数字(0-100)]
+      },
+      {
+        "label": "爆款模型",
+        "data": [数字(0-100), 数字(0-100), 数字(0-100), 数字(0-100), 数字(0-100), 数字(0-100)]
+      }
+    ]
   }
 }
 """
@@ -156,6 +177,31 @@ JSON_RESPONSE_SCHEMA = {
                                         "sfx": {"type": "STRING", "description": "音效或剪辑说明"}
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "ranking": {"type": "NUMBER", "description": "排名百分比"},
+        "radarData": {
+            "type": "OBJECT",
+            "properties": {
+                "labels": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": "雷达图的维度标签"
+                },
+                "datasets": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "label": {"type": "STRING", "description": "数据集的标签"},
+                            "data": {
+                                "type": "ARRAY",
+                                "items": {"type": "NUMBER"},
+                                "description": "在各个维度上的得分"
                             }
                         }
                     }

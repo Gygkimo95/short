@@ -114,6 +114,92 @@ const getPriorityClass = (priority = "") => {
 }
 
 
+// ==============================================================================
+// Component: RadarChart (新增)
+// 这个新组件使用 Chart.js 库来绘制雷达图。
+// ==============================================================================
+const RadarChart = ({ data }) => {
+    const chartRef = React.useRef(null);
+    const chartInstanceRef = React.useRef(null);
+
+    React.useEffect(() => {
+        if (!chartRef.current || !data) return;
+
+        // 销毁旧的图表实例，防止内存泄漏和重叠渲染
+        if (chartInstanceRef.current) {
+            chartInstanceRef.current.destroy();
+        }
+
+        const ctx = chartRef.current.getContext('2d');
+        chartInstanceRef.current = new Chart(ctx, {
+            type: 'radar',
+            data: {
+                labels: data.labels,
+                datasets: [
+                    {
+                        label: data.datasets[0]?.label || '您的视频',
+                        data: data.datasets[0]?.data,
+                        fill: true,
+                        backgroundColor: 'rgba(59, 130, 246, 0.2)', // 蓝色区域
+                        borderColor: 'rgb(59, 130, 246)',
+                        pointBackgroundColor: 'rgb(59, 130, 246)',
+                        pointBorderColor: '#fff',
+                        pointHoverBackgroundColor: '#fff',
+                        pointHoverBorderColor: 'rgb(59, 130, 246)'
+                    },
+                    {
+                        label: data.datasets[1]?.label || '爆款模型',
+                        data: data.datasets[1]?.data,
+                        fill: true,
+                        backgroundColor: 'rgba(34, 197, 94, 0.2)', // 绿色区域
+                        borderColor: 'rgb(34, 197, 94)',
+                        pointBackgroundColor: 'rgb(34, 197, 94)',
+                        pointBorderColor: '#fff',
+                        pointHoverBackgroundColor: '#fff',
+                        pointHoverBorderColor: 'rgb(34, 197, 94)'
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        position: 'top', // 将图例放在顶部
+                    },
+                },
+                scales: {
+                    r: {
+                        angleLines: { display: true },
+                        suggestedMin: 0,
+                        suggestedMax: 100,
+                        pointLabels: {
+                            font: { size: 13 }
+                        },
+                        ticks: {
+                            stepSize: 20 // 刻度步长
+                        }
+                    }
+                }
+            }
+        });
+
+        // 组件卸载时销毁图表
+        return () => {
+            if (chartInstanceRef.current) {
+                chartInstanceRef.current.destroy();
+            }
+        };
+    }, [data]); // 当 data 变化时重新渲染图表
+
+    return (
+        <div className="bg-white p-4 rounded-lg border">
+            <canvas ref={chartRef}></canvas>
+        </div>
+    );
+};
+
+
 // Component: ReportView
 const ReportView = ({ onReset, reportData }) => {
     if (!reportData) return null;
@@ -121,6 +207,7 @@ const ReportView = ({ onReset, reportData }) => {
     let { 
         overallScore, 
         conclusion, // This might be undefined
+        radarData, // <-- 新增: 雷达图数据
         detailedAnalysis, 
         overallReview, 
         optimizedScripts,
@@ -152,6 +239,14 @@ const ReportView = ({ onReset, reportData }) => {
                     <p className={`text-xl font-semibold ${scoreClass}`}>{conclusion?.title}</p>
                     <p className="text-sm text-gray-500 mt-1">{conclusion?.description}</p>
                 </div>
+
+                {/* --- 新增：数据雷达图模块 --- */}
+                {radarData && radarData.labels && radarData.datasets && (
+                    <div className="analysis-section mb-8">
+                        <h3 className="text-xl font-bold text-gray-800 mb-4 pb-2 border-b-2">数据雷达图</h3>
+                        <RadarChart data={radarData} />
+                    </div>
+                )}
                 
                 {detailedAnalysis && (
                     <div className="analysis-section mb-8">
@@ -248,7 +343,7 @@ function App() {
             // 3. 发送 FormData 到后端
             // 注意：当使用 FormData 时，浏览器会自动设置正确的 'Content-Type' (multipart/form-data)，
             // 所以我们不再需要在 headers 中手动设置它。
-            const response = await fetch('http://127.0.0.1:8000/diagnose', {
+            const response = await fetch('http://0.0.0.0:8000/diagnose', {
                 method: 'POST',
                 body: formData, // 直接将 formData 作为 body
             });
