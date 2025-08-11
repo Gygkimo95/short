@@ -155,6 +155,31 @@ def _debug_dump_response(resp):
         print(f"[DEBUG] dump response failed: {e}")
 
 
+# 新增辅助函数：检查是否包含文本部分
+def _has_text_parts(resp) -> bool:
+    for cand in getattr(resp, "candidates", []) or []:
+        content = getattr(cand, "content", None)
+        for p in getattr(content, "parts", []) or []:
+            if getattr(p, "text", None):
+                return True
+    return False
+
+
+# 新增辅助函数：打印 finish_reason 与可能的安全信息
+def _debug_print_finish_and_safety(resp):
+    if not DEBUG_GEMINI:
+        return
+    try:
+        for ci, cand in enumerate(getattr(resp, "candidates", []) or []):
+            fr = getattr(cand, "finish_reason", None)
+            print(f"[DEBUG] - cand[{ci}] finish_reason={fr}")
+            safety = getattr(cand, "safety_ratings", None) or getattr(cand, "safety_feedback", None)
+            if safety:
+                print(f"[DEBUG] - cand[{ci}] safety={safety}")
+    except Exception as e:
+        print(f"[DEBUG] finish/safety inspect failed: {e}")
+
+
 async def diagnose_video_with_gemini(video_file: UploadFile):
     if not config.API_KEY:
         raise HTTPException(status_code=500, detail="后端 AI 服务未正确配置 API 密钥。")
@@ -191,7 +216,8 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
 
         # 3. 准备 Prompt 和模型
         full_prompt_text = f"{config.SYSTEM_PROMPT}\n\n{config.EVALUATION_SHEET}\n\n---\n现在，请根据上述规则和评估表，对这个视频文件进行全面分析。请严格按照我指定的 JSON 格式输出你的分析结果。"
-        prompt_parts = [full_prompt_text, video_file_gai]
+        # 将视频放在前、文本在后
+        prompt_parts = [video_file_gai, full_prompt_text]
         
         model = genai.GenerativeModel(
             model_name=config.MODEL_NAME,
@@ -227,6 +253,7 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
         print("==================================================\n")
 
         _debug_print_response_structure(response)
+        _debug_print_finish_and_safety(response)
         _debug_dump_response(response)
 
         # 提取并解析JSON
