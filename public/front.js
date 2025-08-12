@@ -343,7 +343,7 @@ function App() {
             // 3. 发送 FormData 到后端
             // 注意：当使用 FormData 时，浏览器会自动设置正确的 'Content-Type' (multipart/form-data)，
             // 所以我们不再需要在 headers 中手动设置它。
-            const response = await fetch('http://0.0.0.0:8000/diagnose', {
+            const response = await fetch('http://10.186.60.38:8000/diagnose', {
                 method: 'POST',
                 body: formData, // 直接将 formData 作为 body
             });
