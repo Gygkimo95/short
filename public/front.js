@@ -41,11 +41,19 @@ const UploadView = ({ onFileSelect, onStartAnalysis, selectedFile, isStartEnable
 );
 
 // Component: AnalysisView
-const AnalysisView = () => (
+const AnalysisView = ({ progress = [] }) => (
     <div className="text-center py-12">
         <div className="inline-block loader"></div>
         <h3 className="text-xl font-semibold mt-6 text-gray-800">AI 正在进行深度诊断...</h3>
         <p className="text-gray-500 mt-2">正在分析视频、调用AI模型、生成报告，请稍候。</p>
+        <ul className="mt-6 text-left max-w-md mx-auto text-sm text-gray-700 space-y-2">
+            {progress.map((p, i) => (
+                <li key={i} className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                    <span>{p.message}{p.percent != null ? ` (${p.percent}%)` : ''}</span>
+                </li>
+            ))}
+        </ul>
     </div>
 );
 
@@ -314,6 +322,9 @@ function App() {
     const [reportData, setReportData] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [progress, setProgress] = useState([]);
+    const [jobId, setJobId] = useState(null);
+    const wsRef = React.useRef(null);
 
     const handleFileSelect = (event) => {
         const file = event.target.files[0];
@@ -325,38 +336,78 @@ function App() {
 
     const handleStartAnalysis = useCallback(async () => {
         if (!selectedFile) return;
-        
+
+        // 清理旧状态/连接
+        if (wsRef.current) {
+            try { wsRef.current.close(); } catch {}
+            wsRef.current = null;
+        }
+        setProgress([]);
+        setJobId(null);
+
         setView('analysis');
         setIsLoading(true);
         setError(null);
-        
+
         try {
-            // 1. 创建一个 FormData 对象
-            // 这是在网页中上传文件的标准方式。
             const formData = new FormData();
-            
-            // 2. 将视频文件追加到 FormData 中
-            // 第一个参数 "video" 是一个键名，必须与后端 FastAPI 接口中 `File(...)` 的参数名一致。
-            // 第二个参数是文件对象，第三个是文件名。
             formData.append('video', selectedFile, selectedFile.name);
 
-            // 3. 发送 FormData 到后端
-            // 注意：当使用 FormData 时，浏览器会自动设置正确的 'Content-Type' (multipart/form-data)，
-            // 所以我们不再需要在 headers 中手动设置它。
-            const response = await fetch('http://10.186.60.38:8000/diagnose', {
+            // 1) 上传，后端快速返回 jobId，实际处理在后台进行
+            const res = await fetch('http://10.186.60.38:8000/diagnose', {
                 method: 'POST',
-                body: formData, // 直接将 formData 作为 body
+                body: formData,
             });
-
-            if (!response.ok) {
-                const errData = await response.json().catch(() => ({ detail: `服务器错误，状态码: ${response.status}` }));
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({ detail: `服务器错误，状态码: ${res.status}` }));
                 throw new Error(errData.detail || '分析时发生未知错误');
             }
+            const uploadResp = await res.json();
+            const newJobId = uploadResp.jobId;
+            if (!newJobId) throw new Error('后端未返回 jobId');
+            setJobId(newJobId);
 
-            const data = await response.json();
-            setReportData(data);
-            setView('report');
+            // 2) 建立 WebSocket，订阅进度
+            const wsUrl = `ws://10.186.60.38:8000/ws/progress?jobId=${encodeURIComponent(newJobId)}`;
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
 
+            ws.onmessage = async (evt) => {
+                try {
+                    const msg = JSON.parse(evt.data);
+                    if (msg.type === 'progress') {
+                        setProgress((prev) => [...prev, { message: msg.message, percent: msg.percent }]);
+                    } else if (msg.type === 'done') {
+                        // 3) 取最终报告并展示
+                        const r = await fetch(`http://10.186.60.38:8000/diagnose/${encodeURIComponent(newJobId)}/result`);
+                        if (!r.ok) throw new Error('获取报告失败');
+                        const data = await r.json();
+                        setReportData(data);
+                        setView('report');
+                        try { ws.close(); } catch {}
+                        wsRef.current = null;
+                    } else if (msg.type === 'error') {
+                        throw new Error(msg.message || '分析失败');
+                    }
+                } catch (e) {
+                    console.error('WS message error:', e);
+                    setError(e.message);
+                    setView('upload');
+                    try { ws.close(); } catch {}
+                    wsRef.current = null;
+                }
+            };
+
+            ws.onerror = () => {
+                setError('进度连接异常');
+                setView('upload');
+                try { ws.close(); } catch {}
+                wsRef.current = null;
+            };
+
+            ws.onclose = () => {
+                // 允许正常关闭；若未到 report 视图且无错误，可视情况决定是否重连
+            };
         } catch (err) {
             console.error('Analysis failed:', err);
             setError(err.message);
@@ -373,6 +424,12 @@ function App() {
         setReportData(null);
         setError(null);
         setIsLoading(false);
+        setProgress([]);
+        setJobId(null);
+        if (wsRef.current) {
+            try { wsRef.current.close(); } catch {}
+            wsRef.current = null;
+        }
         const fileInput = document.getElementById('video-upload');
         if(fileInput) fileInput.value = '';
     }, []);
@@ -397,7 +454,7 @@ function App() {
                         )}
                     </>
                 )}
-                {view === 'analysis' && <AnalysisView />}
+                {view === 'analysis' && <AnalysisView progress={progress} />}
                 {view === 'report' && (
                     <ReportView 
                         onReset={handleReset}

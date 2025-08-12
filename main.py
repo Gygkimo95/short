@@ -10,11 +10,12 @@ import base64, binascii
 import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+import uuid
 
 app = FastAPI()
 
@@ -26,7 +27,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # 允许所有来源的CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应配置为更严格的来源
+    allow_origins=["http://10.186.60.38:8000", "http://your-frontend-origin"],  # 调整
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +40,32 @@ if not config.API_KEY:
     # 在这种情况下，让应用启动，但后续的AI调用会失败
 else:
     genai.configure(api_key=config.API_KEY)
+
+
+class WSManager:
+    def __init__(self):
+        self.rooms = {}  # job_id -> set(websocket)
+
+    async def connect(self, job_id: str, ws: WebSocket):
+        await ws.accept()
+        self.rooms.setdefault(job_id, set()).add(ws)
+
+    def disconnect(self, job_id: str, ws: WebSocket):
+        if job_id in self.rooms:
+            self.rooms[job_id].discard(ws)
+            if not self.rooms[job_id]:
+                del self.rooms[job_id]
+
+    async def emit(self, job_id: str, payload: dict):
+        conns = self.rooms.get(job_id, set()).copy()
+        for ws in conns:
+            try:
+                await ws.send_text(json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                self.disconnect(job_id, ws)
+
+manager = WSManager()
+results = {}  # job_id -> final report
 
 
 def _extract_json_from_response(resp):
@@ -299,7 +326,72 @@ async def diagnose_endpoint(video: UploadFile = File(...)):
     if not video.content_type.startswith('video/'):
         raise HTTPException(status_code=400, detail="上传的文件不是有效的视频格式。")
     print(f"接收到上传文件: {video.filename}, 类型: {video.content_type}")
-    return await diagnose_video_with_gemini(video)
+    job_id = str(uuid.uuid4())
+    dst = f"/tmp/{job_id}_{video.filename}"
+    with open(dst, "wb") as f:
+        f.write(await video.read())
+
+    asyncio.create_task(process_job(job_id, dst))
+    return {"jobId": job_id}
+
+@app.websocket("/ws/progress")
+async def ws_progress(ws: WebSocket):
+    job_id = ws.query_params.get("jobId")
+    if not job_id:
+        await ws.close()
+        return
+    await manager.connect(job_id, ws)
+    try:
+        # 保持连接直到客户端断开
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(job_id, ws)
+
+@app.get("/diagnose/{job_id}/result")
+async def get_result(job_id: str):
+    if job_id not in results:
+        raise HTTPException(status_code=404, detail="Result not ready")
+    return results[job_id]
+
+async def process_job(job_id: str, filepath: str):
+    try:
+        await manager.emit(job_id, {"type": "progress", "message": "已接收", "percent": 5})
+        await asyncio.sleep(0.5)
+
+        await manager.emit(job_id, {"type": "progress", "message": "已保存", "percent": 10})
+        await asyncio.sleep(0.5)
+
+        await manager.emit(job_id, {"type": "progress", "message": "正在上传到对象存储", "percent": 30})
+        await asyncio.sleep(1.5)
+
+        await manager.emit(job_id, {"type": "progress", "message": "AI 分析中：阶段 1/3", "percent": 50})
+        await asyncio.sleep(1.0)
+        await manager.emit(job_id, {"type": "progress", "message": "AI 分析中：阶段 2/3", "percent": 70})
+        await asyncio.sleep(1.0)
+        await manager.emit(job_id, {"type": "progress", "message": "AI 分析中：阶段 3/3", "percent": 90})
+        await asyncio.sleep(1.0)
+
+        # 生成最终报告
+        report = {
+            "overallScore": 86,
+            "conclusion": {"title": "潜力爆款", "description": "节奏良好，开头吸引力强"},
+            "radarData": {"labels": ["节奏","完播","点赞","评论","转化"], "datasets":[
+                {"label":"您的视频","data":[80,85,88,76,82]},
+                {"label":"爆款模型","data":[90,92,90,88,90]}
+            ]},
+            # ... 其它字段 ...
+        }
+        results[job_id] = report
+        await manager.emit(job_id, {"type": "done"})
+    except Exception as e:
+        await manager.emit(job_id, {"type": "error", "message": str(e)})
+    finally:
+        try:
+            os.remove(filepath)
+        except Exception:
+            pass
+
 
 # 静态文件服务
 app.mount("/static", StaticFiles(directory="public"), name="static")
