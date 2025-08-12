@@ -16,8 +16,26 @@ import uvicorn
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uuid
+from typing import IO, Optional, Callable, Awaitable
 
 app = FastAPI()
+
+# 模拟 UploadFile 对象，以便在后台任务中复用 diagnose_video_with_gemini
+class MockUploadFile:
+    def __init__(self, filepath: str, filename: str, content_type: str):
+        self.filepath = filepath
+        self._file: IO[bytes] = open(filepath, "rb")
+        self.filename = filename
+        self.content_type = content_type
+
+    async def read(self) -> bytes:
+        # Since the file is read in one go by the background task,
+        # we can read it all here.
+        self._file.seek(0)
+        return self._file.read()
+
+    async def close(self):
+        self._file.close()
 
 # 调试总开关与日志目录
 DEBUG_GEMINI = True  # 生产环境可改为 False，或用环境变量控制
@@ -207,22 +225,32 @@ def _debug_print_finish_and_safety(resp):
         print(f"[DEBUG] finish/safety inspect failed: {e}")
 
 
-async def diagnose_video_with_gemini(video_file: UploadFile):
+# Helper type for the progress callback
+ProgressCallback = Optional[Callable[[str, int], Awaitable[None]]]
+
+async def diagnose_video_with_gemini(video_file: UploadFile, progress_callback: ProgressCallback = None):
     if not config.API_KEY:
         raise HTTPException(status_code=500, detail="后端 AI 服务未正确配置 API 密钥。")
+    
+    # 辅助函数，安全地调用回调
+    async def update_progress(message: str, percent: int):
+        if progress_callback:
+            await progress_callback(message, percent)
 
     local_tmp_path = None
     video_file_gai = None
     try:
+        await update_progress("正在准备视频文件", 15)
         # 1. 保存临时文件
+        content = await video_file.read()
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(video_file.filename)[1]) as tmp:
-            content = await video_file.read()
             tmp.write(content)
             local_tmp_path = tmp.name
         
         video_title = video_file.filename or "untitled.mp4"
         print(f"视频已保存到本地临时文件: {local_tmp_path}")
         print(f"--- 正在上传视频 '{video_title}' 到 Google AI... ---")
+        await update_progress("正在上传至AI服务", 20)
         
         # 2. 上传文件到 Google AI
         video_file_gai = genai.upload_file(
@@ -231,15 +259,21 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
             mime_type=video_file.content_type
         )
         
+        upload_progress = 25
         while video_file_gai.state.name == "PROCESSING":
             print("视频正在处理中，请稍候...")
+            await update_progress(f"AI服务正在处理视频... ({upload_progress}%)", upload_progress)
             await asyncio.sleep(5)
             video_file_gai = genai.get_file(video_file_gai.name)
+            if upload_progress < 50:
+                upload_progress += 5
+
 
         if video_file_gai.state.name == "FAILED":
             raise HTTPException(status_code=500, detail="AI 服务无法处理上传的视频文件。")
 
         print(f"--- 视频上传成功，文件名为: {video_file_gai.name} ---")
+        await update_progress("视频上传完成，准备分析", 50)
 
         # 3. 准备 Prompt 和模型
         full_prompt_text = f"{config.SYSTEM_PROMPT}\n\n{config.EVALUATION_SHEET}\n\n---\n现在，请根据上述规则和评估表，对这个视频文件进行全面分析。请严格按照我指定的 JSON 格式输出你的分析结果。"
@@ -265,6 +299,7 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
         
         # 4. 调用模型
         print("--- 正在向 Gemini 发送分析请求 (文本模式)... ---")
+        await update_progress("正在请求AI进行分析...", 60)
         response = await model.generate_content_async(prompt_parts)
 
         # 打印原始响应以供调试
@@ -283,6 +318,7 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
         _debug_print_finish_and_safety(response)
         _debug_dump_response(response)
 
+        await update_progress("正在解析AI返回的结果...", 85)
         # 提取并解析JSON
         report_data = _extract_json_from_response(response)
         
@@ -298,6 +334,7 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
         }
 
         print("--- 成功从 Gemini API 接收并解析报告。 ---")
+        await update_progress("分析完成", 100)
         return final_report
 
     except Exception as e:
@@ -323,15 +360,26 @@ async def diagnose_video_with_gemini(video_file: UploadFile):
 
 @app.post("/diagnose")
 async def diagnose_endpoint(video: UploadFile = File(...)):
-    if not video.content_type.startswith('video/'):
+    if not video.content_type or not video.content_type.startswith('video/'):
         raise HTTPException(status_code=400, detail="上传的文件不是有效的视频格式。")
     print(f"接收到上传文件: {video.filename}, 类型: {video.content_type}")
+    
     job_id = str(uuid.uuid4())
-    dst = f"/tmp/{job_id}_{video.filename}"
-    with open(dst, "wb") as f:
-        f.write(await video.read())
+    # 为了安全和唯一性，使用 job_id 和原始文件名结合
+    safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '', video.filename or "unknown_video")
+    dst = f"/tmp/{job_id}_{safe_filename}"
 
-    asyncio.create_task(process_job(job_id, dst))
+    try:
+        # 将上传的文件内容写入临时文件
+        content = await video.read()
+        with open(dst, "wb") as f:
+            f.write(content)
+    except Exception as e:
+        print(f"保存上传文件失败: {e}")
+        raise HTTPException(status_code=500, detail=f"保存上传文件失败: {e}")
+
+    # 启动后台任务处理
+    asyncio.create_task(process_job(job_id, dst, video.filename, video.content_type))
     return {"jobId": job_id}
 
 @app.websocket("/ws/progress")
@@ -354,43 +402,41 @@ async def get_result(job_id: str):
         raise HTTPException(status_code=404, detail="Result not ready")
     return results[job_id]
 
-async def process_job(job_id: str, filepath: str):
+async def process_job(job_id: str, filepath: str, original_filename: str, content_type: str):
+    mock_video_file = None
     try:
-        await manager.emit(job_id, {"type": "progress", "message": "已接收", "percent": 5})
-        await asyncio.sleep(0.5)
+        await manager.emit(job_id, {"type": "progress", "message": "已接收，准备处理...", "percent": 5})
+        
+        # 创建一个模拟的 UploadFile 对象
+        mock_video_file = MockUploadFile(filepath=filepath, filename=original_filename, content_type=content_type)
+        
+        await manager.emit(job_id, {"type": "progress", "message": "文件准备就绪，开始AI分析...", "percent": 10})
+        
+        # 定义一个回调函数来更新进度
+        async def progress_callback(message: str, percent: int):
+            await manager.emit(job_id, {"type": "progress", "message": message, "percent": percent})
 
-        await manager.emit(job_id, {"type": "progress", "message": "已保存", "percent": 10})
-        await asyncio.sleep(0.5)
+        # 调用真正的分析函数，并传入进度回调
+        final_report = await diagnose_video_with_gemini(mock_video_file, progress_callback)
+        
+        results[job_id] = final_report
+        await manager.emit(job_id, {"type": "done", "reportId": final_report.get("reportId")})
 
-        await manager.emit(job_id, {"type": "progress", "message": "正在上传到对象存储", "percent": 30})
-        await asyncio.sleep(1.5)
-
-        await manager.emit(job_id, {"type": "progress", "message": "AI 分析中：阶段 1/3", "percent": 50})
-        await asyncio.sleep(1.0)
-        await manager.emit(job_id, {"type": "progress", "message": "AI 分析中：阶段 2/3", "percent": 70})
-        await asyncio.sleep(1.0)
-        await manager.emit(job_id, {"type": "progress", "message": "AI 分析中：阶段 3/3", "percent": 90})
-        await asyncio.sleep(1.0)
-
-        # 生成最终报告
-        report = {
-            "overallScore": 86,
-            "conclusion": {"title": "潜力爆款", "description": "节奏良好，开头吸引力强"},
-            "radarData": {"labels": ["节奏","完播","点赞","评论","转化"], "datasets":[
-                {"label":"您的视频","data":[80,85,88,76,82]},
-                {"label":"爆款模型","data":[90,92,90,88,90]}
-            ]},
-            # ... 其它字段 ...
-        }
-        results[job_id] = report
-        await manager.emit(job_id, {"type": "done"})
     except Exception as e:
-        await manager.emit(job_id, {"type": "error", "message": str(e)})
+        print(f"[JOB:{job_id}] 发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+        await manager.emit(job_id, {"type": "error", "message": f"处理失败: {str(e)}"})
     finally:
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
+        if mock_video_file:
+            await mock_video_file.close() # 关闭文件句柄
+        # 清理临时文件
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                print(f"[JOB:{job_id}] 临时文件 {filepath} 已删除。")
+            except OSError as e:
+                print(f"[JOB:{job_id}] 删除临时文件 {filepath} 失败: {e}")
 
 
 # 静态文件服务
