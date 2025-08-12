@@ -368,7 +368,8 @@ function App() {
             setJobId(newJobId);
 
             // 2) 建立 WebSocket，订阅进度
-            const wsUrl = `ws://10.186.60.38:8000/ws/progress?jobId=${encodeURIComponent(newJobId)}`;
+            const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${wsScheme}://${window.location.host}/ws/progress?jobId=${encodeURIComponent(newJobId)}`;
             const ws = new WebSocket(wsUrl);
             wsRef.current = ws;
 
