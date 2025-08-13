@@ -16,7 +16,8 @@ import uvicorn
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uuid
-from typing import IO, Optional, Callable, Awaitable
+from typing import IO, Optional, Callable, Awaitable, List, Tuple
+from pydantic import BaseModel, Field
 
 app = FastAPI()
 
@@ -58,6 +59,77 @@ if not config.API_KEY:
     # 在这种情况下，让应用启动，但后续的AI调用会失败
 else:
     genai.configure(api_key=config.API_KEY)
+
+
+# --- New Data Models for Database Interaction & Comparison ---
+class RecommendationItem(BaseModel):
+    title: str
+    description: str
+
+class Recommendations(BaseModel):
+    for_pros: Optional[RecommendationItem] = None
+    for_cons: Optional[RecommendationItem] = None
+
+class RadarDataset(BaseModel):
+    label: str
+    data: List[float]
+
+# This represents a record that would be saved to the database
+class VideoAnalysisRecord(BaseModel):
+    video_id: str
+    video_title: str
+    category: str = "default"
+    radar_labels: List[str]
+    radar_scores: List[float]
+    overall_score: int
+    full_report: dict # Store the original report as a JSON blob
+
+
+# --- Database Interaction Stubs ---
+def find_comparable_videos(
+    current_video_scores: List[float],
+    current_video_labels: List[str]
+) -> Tuple[List[RadarDataset], Recommendations]:
+    """
+    STUB: 模拟查询数据库以查找可比较的视频。
+    在真实实现中，这将查询一个 pgvector 表。
+    """
+    print("[STUB] 正在查找可比较的视频...")
+    
+    # 硬编码的对比数据
+    comparison_datasets = [
+        RadarDataset(
+            label="爆款模型",
+            data=[95, 88, 92, 85, 90, 94]
+        ),
+        RadarDataset(
+            label="传播长板模型",
+            data=[70, 75, 68, 72, 65, 98] # 在“传播分享驱动力”上得分很高
+        )
+    ]
+
+    # 硬编码的推荐数据
+    recommendations = Recommendations(
+        for_pros=RecommendationItem(
+            title="《我三舅的爆款人生》",
+            description="总分高达95分，是您所在领域的顶尖案例。"
+        ),
+        for_cons=RecommendationItem(
+            title="《靠一个转场吸粉百万》",
+            description="“传播分享驱动力”高达98分，其结尾创意值得借鉴。"
+        )
+    )
+    
+    print(f"[STUB] 找到 {len(comparison_datasets)} 个对比样本和2个推荐案例。")
+    return comparison_datasets, recommendations
+
+def save_analysis_to_db(record: VideoAnalysisRecord):
+    """
+    STUB: 模拟将分析记录保存到数据库。
+    """
+    # 在真实实现中，这将是一个 INSERT 语句。
+    print(f"[STUB] 正在 '保存' 视频 '{record.video_title}' 的分析结果到数据库...")
+    pass
 
 
 class WSManager:
@@ -407,18 +479,66 @@ async def process_job(job_id: str, filepath: str, original_filename: str, conten
     try:
         await manager.emit(job_id, {"type": "progress", "message": "已接收，准备处理...", "percent": 5})
         
-        # 创建一个模拟的 UploadFile 对象
         mock_video_file = MockUploadFile(filepath=filepath, filename=original_filename, content_type=content_type)
         
         await manager.emit(job_id, {"type": "progress", "message": "文件准备就绪，开始AI分析...", "percent": 10})
         
-        # 定义一个回调函数来更新进度
         async def progress_callback(message: str, percent: int):
             await manager.emit(job_id, {"type": "progress", "message": message, "percent": percent})
 
-        # 调用真正的分析函数，并传入进度回调
-        final_report = await diagnose_video_with_gemini(mock_video_file, progress_callback)
+        # 1. 从AI获取初步分析报告
+        initial_report = await diagnose_video_with_gemini(mock_video_file, progress_callback)
         
+        # --- 新增逻辑：数据丰富 ---
+        await manager.emit(job_id, {"type": "progress", "message": "正在生成对比分析...", "percent": 95})
+        
+        # 2. 从初步报告中提取雷达图数据用于比较
+        current_radar_data = initial_report.get("radarData", {})
+        current_labels = current_radar_data.get("labels", [])
+        current_scores = []
+        if current_radar_data.get("datasets"):
+             # 假设用户的视频总是第一个数据集
+            current_scores = current_radar_data["datasets"][0].get("data", [])
+
+        # 3. 调用桩函数获取对比数据和推荐
+        if current_scores and current_labels:
+            comparison_datasets, recommendations = find_comparable_videos(
+                current_video_scores=current_scores,
+                current_video_labels=current_labels
+            )
+        else: # 如果AI未返回雷达图数据，则使用空值
+            print("[警告] AI报告中未找到雷达图数据，跳过对比分析。")
+            comparison_datasets, recommendations = [], Recommendations()
+
+        # 4. 将对比数据丰富到最终报告中
+        final_report = initial_report.copy()
+        
+        # 将对比数据集添加到雷达图数据中 (用户的视频已经是dataset[0])
+        if final_report.get("radarData") and final_report["radarData"].get("datasets"):
+             final_report["radarData"]["datasets"].extend([ds.dict() for ds in comparison_datasets])
+        
+        # 添加新的、结构化的推荐
+        if final_report.get("overallReview"):
+            final_report["overallReview"]["recommendations"] = recommendations.dict()
+        else: # 如果没有 overallReview，则创建一个
+            final_report["overallReview"] = {"recommendations": recommendations.dict()}
+
+        # 5. 调用桩函数“保存”分析结果到数据库
+        try:
+            db_record = VideoAnalysisRecord(
+                video_id=job_id,
+                video_title=final_report.get("videoTitle", "N/A"),
+                radar_labels=current_labels,
+                radar_scores=current_scores,
+                overall_score=final_report.get("overallScore", 0),
+                full_report=final_report # 存储完整的报告
+            )
+            save_analysis_to_db(db_record)
+        except Exception as db_e:
+            # 确保数据库存根的错误不会中断主流程
+            print(f"[警告] 调用数据库保存存根时失败: {db_e}")
+        # --- 数据丰富逻辑结束 ---
+
         results[job_id] = final_report
         await manager.emit(job_id, {"type": "done", "reportId": final_report.get("reportId")})
 

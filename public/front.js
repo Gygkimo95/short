@@ -120,6 +120,13 @@ const getPriorityClass = (priority = "") => {
     return 'bg-gray-400';
 }
 
+const COMPARISON_COLORS = [
+    { background: 'rgba(34, 197, 94, 0.2)', border: 'rgb(34, 197, 94)' },    // Green
+    { background: 'rgba(255, 159, 64, 0.2)', border: 'rgb(255, 159, 64)' }, // Orange
+    { background: 'rgba(153, 102, 255, 0.2)', border: 'rgb(153, 102, 255)' }, // Purple
+    { background: 'rgba(255, 99, 132, 0.2)', border: 'rgb(255, 99, 132)' },  // Red
+];
+
 
 // ==============================================================================
 // New Report Sub-Components
@@ -159,8 +166,7 @@ const CollapsibleSection = ({ number, title, children }) => {
     );
 };
 
-const Tabs = ({ tabs }) => {
-    const [activeTab, setActiveTab] = React.useState(0);
+const Tabs = ({ tabs, activeTab, onTabClick }) => {
     const activeContent = tabs[activeTab].content;
 
     return (
@@ -170,7 +176,7 @@ const Tabs = ({ tabs }) => {
                     <button
                         key={index}
                         className={`py-2 px-4 font-semibold text-sm focus:outline-none ${activeTab === index ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
-                        onClick={() => setActiveTab(index)}
+                        onClick={() => onTabClick(index)}
                     >
                         {tab.title}
                     </button>
@@ -209,42 +215,49 @@ const RadarChart = ({ data }) => {
     const chartInstanceRef = React.useRef(null);
 
     React.useEffect(() => {
-        if (!chartRef.current || !data) return;
+        if (!chartRef.current || !data || !data.datasets || data.datasets.length === 0) return;
 
         // 销毁旧的图表实例，防止内存泄漏和重叠渲染
         if (chartInstanceRef.current) {
             chartInstanceRef.current.destroy();
         }
 
+        const chartDatasets = data.datasets.map((ds, index) => {
+            // 第一个数据集始终是用户的视频（蓝色）
+            if (index === 0) {
+                return {
+                    label: ds.label || '您的视频',
+                    data: ds.data,
+                    fill: true,
+                    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                    borderColor: 'rgb(59, 130, 246)',
+                    pointBackgroundColor: 'rgb(59, 130, 246)',
+                    pointBorderColor: '#fff',
+                    pointHoverBackgroundColor: '#fff',
+                    pointHoverBorderColor: 'rgb(59, 130, 246)'
+                };
+            }
+            // 对比视频从预设颜色中循环取用
+            const color = COMPARISON_COLORS[(index - 1) % COMPARISON_COLORS.length];
+            return {
+                label: ds.label || `对比样本 ${index}`,
+                data: ds.data,
+                fill: true,
+                backgroundColor: color.background,
+                borderColor: color.border,
+                pointBackgroundColor: color.border,
+                pointBorderColor: '#fff',
+                pointHoverBackgroundColor: '#fff',
+                pointHoverBorderColor: color.border,
+            };
+        });
+
         const ctx = chartRef.current.getContext('2d');
         chartInstanceRef.current = new Chart(ctx, {
             type: 'radar',
             data: {
                 labels: data.labels,
-                datasets: [
-                    {
-                        label: data.datasets[0]?.label || '您的视频',
-                        data: data.datasets[0]?.data,
-                        fill: true,
-                        backgroundColor: 'rgba(59, 130, 246, 0.2)', // 蓝色区域
-                        borderColor: 'rgb(59, 130, 246)',
-                        pointBackgroundColor: 'rgb(59, 130, 246)',
-                        pointBorderColor: '#fff',
-                        pointHoverBackgroundColor: '#fff',
-                        pointHoverBorderColor: 'rgb(59, 130, 246)'
-                    },
-                    {
-                        label: data.datasets[1]?.label || '爆款模型',
-                        data: data.datasets[1]?.data,
-                        fill: true,
-                        backgroundColor: 'rgba(34, 197, 94, 0.2)', // 绿色区域
-                        borderColor: 'rgb(34, 197, 94)',
-                        pointBackgroundColor: 'rgb(34, 197, 94)',
-                        pointBorderColor: '#fff',
-                        pointHoverBackgroundColor: '#fff',
-                        pointHoverBorderColor: 'rgb(34, 197, 94)'
-                    }
-                ]
+                datasets: chartDatasets,
             },
             options: {
                 responsive: true,
@@ -290,6 +303,8 @@ const RadarChart = ({ data }) => {
 const ReportView = ({ onReset, reportData }) => {
     if (!reportData) return null;
 
+    const [activeTab, setActiveTab] = React.useState(0);
+
     let { 
         overallScore, 
         conclusion,
@@ -310,13 +325,12 @@ const ReportView = ({ onReset, reportData }) => {
         };
     }
 
-    // Mock recommendation data if not present, to ensure layout is stable
-    if (overallReview && !overallReview.recommendation) {
-        overallReview.recommendation = { 
-            title: "《重生之我在古代当厨神》", 
-            description: "亮点: 黄金3秒抓人, 完播率65%" 
-        };
-    }
+    // New logic: Determine the active recommendation based on the selected tab
+    // Tab 0: 优点 -> for_pros
+    // Tab 1: 不足 -> for_cons
+    const activeRecommendation = activeTab === 0 
+        ? overallReview?.recommendations?.for_pros
+        : overallReview?.recommendations?.for_cons;
     
     const scoreClass = getScoreClass(overallScore);
 
@@ -382,8 +396,8 @@ const ReportView = ({ onReset, reportData }) => {
                            {radarData && <RadarChart data={radarData} />}
                         </div>
                         <div>
-                           <Tabs tabs={tabs} />
-                           <RecommendationCard recommendation={overallReview?.recommendation} />
+                           <Tabs tabs={tabs} activeTab={activeTab} onTabClick={setActiveTab} />
+                           <RecommendationCard recommendation={activeRecommendation} />
                         </div>
                     </div>
                 </ReportSection>
