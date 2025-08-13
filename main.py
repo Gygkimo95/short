@@ -9,6 +9,7 @@ import unicodedata
 import base64, binascii
 import datetime
 from pathlib import Path
+import ssl
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,8 +19,35 @@ from fastapi.responses import FileResponse
 import uuid
 from typing import IO, Optional, Callable, Awaitable, List, Tuple
 from pydantic import BaseModel, Field
+import asyncpg # 导入 asyncpg
+
+# --- Database Connection Pool ---
+db_pool = None
+
+async def get_db_pool():
+    global db_pool
+    if db_pool is None:
+        if not config.DATABASE_URL:
+             raise ValueError("DATABASE_URL not configured in config.py")
+        db_pool = await asyncpg.create_pool(dsn=config.DATABASE_URL)
+    return db_pool
 
 app = FastAPI()
+
+@app.on_event("startup")
+async def startup_event():
+    # 应用程序启动时创建连接池
+    await get_db_pool()
+    print("Database connection pool created.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # 应用程序关闭时关闭连接池
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        print("Database connection pool closed.")
+
 
 # 模拟 UploadFile 对象，以便在后台任务中复用 diagnose_video_with_gemini
 class MockUploadFile:
@@ -86,50 +114,96 @@ class VideoAnalysisRecord(BaseModel):
 
 
 # --- Database Interaction Stubs ---
-def find_comparable_videos(
+async def find_comparable_videos(
+    current_video_id: str,
     current_video_scores: List[float],
-    current_video_labels: List[str]
 ) -> Tuple[List[RadarDataset], Recommendations]:
     """
-    STUB: 模拟查询数据库以查找可比较的视频。
-    在真实实现中，这将查询一个 pgvector 表。
+    真实实现: 查询数据库以查找可比较的视频。
     """
-    print("[STUB] 正在查找可比较的视频...")
-    
-    # 硬编码的对比数据
-    comparison_datasets = [
-        RadarDataset(
-            label="爆款模型",
-            data=[95, 88, 92, 85, 90, 94]
-        ),
-        RadarDataset(
-            label="传播长板模型",
-            data=[70, 75, 68, 72, 65, 98] # 在“传播分享驱动力”上得分很高
-        )
-    ]
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        print("[DB] 正在查找可比较的视频...")
 
-    # 硬编码的推荐数据
-    recommendations = Recommendations(
-        for_pros=RecommendationItem(
-            title="《我三舅的爆款人生》",
-            description="总分高达95分，是您所在领域的顶尖案例。"
-        ),
-        for_cons=RecommendationItem(
-            title="《靠一个转场吸粉百万》",
-            description="“传播分享驱动力”高达98分，其结尾创意值得借鉴。"
+        # 1. 查询总分最高的作为优点推荐
+        pro_rec_row = await conn.fetchrow(
+            """
+            SELECT video_title, overall_score FROM video_analyses
+            WHERE video_id != $1 ORDER BY overall_score DESC LIMIT 1
+            """,
+            current_video_id
         )
-    )
-    
-    print(f"[STUB] 找到 {len(comparison_datasets)} 个对比样本和2个推荐案例。")
-    return comparison_datasets, recommendations
+        pro_rec = RecommendationItem(
+            title=pro_rec_row['video_title'],
+            description=f"总分高达{pro_rec_row['overall_score']}分，是行业内的顶尖案例。"
+        ) if pro_rec_row else None
 
-def save_analysis_to_db(record: VideoAnalysisRecord):
+        # 2. 查询补短板的作为缺点推荐
+        min_score_index = current_video_scores.index(min(current_video_scores))
+        # SQL的数组索引从1开始
+        sql_index = min_score_index + 1
+        
+        # !! 安全注意: 直接格式化SQL有风险，但这里我们完全控制索引是整数，所以是安全的。
+        # 不接受任何用户输入。
+        con_rec_row = await conn.fetchrow(
+            f"""
+            SELECT video_title, (radar_scores_vector::real[])[{sql_index}] as weak_point_score
+            FROM video_analyses
+            WHERE video_id != $1 ORDER BY (radar_scores_vector::real[])[{sql_index}] DESC LIMIT 1
+            """,
+            current_video_id
+        )
+        con_rec = RecommendationItem(
+            title=con_rec_row['video_title'],
+            description=f"此案例在您的弱项上得分高达{int(con_rec_row['weak_point_score'])}分，值得借鉴。"
+        ) if con_rec_row else None
+        
+        recommendations = Recommendations(for_pros=pro_rec, for_cons=con_rec)
+
+        # 3. 查询向量最相似的2个作为雷达图对比
+        comparison_rows = await conn.fetch(
+            """
+            SELECT video_title, radar_scores_vector FROM video_analyses
+            WHERE video_id != $1 ORDER BY radar_scores_vector <=> $2 LIMIT 2
+            """,
+            current_video_id,
+            str(current_video_scores) # pgvector接受列表的字符串形式
+        )
+
+        comparison_datasets = [
+            RadarDataset(label=row['video_title'], data=json.loads(row['radar_scores_vector']))
+            for row in comparison_rows
+        ]
+        
+        print(f"[DB] 找到 {len(comparison_datasets)} 个对比样本和 {sum(1 for r in [pro_rec, con_rec] if r)} 个推荐案例。")
+        return comparison_datasets, recommendations
+
+
+async def save_analysis_to_db(record: VideoAnalysisRecord):
     """
-    STUB: 模拟将分析记录保存到数据库。
+    真实实现: 将分析记录保存到数据库。
     """
-    # 在真实实现中，这将是一个 INSERT 语句。
-    print(f"[STUB] 正在 '保存' 视频 '{record.video_title}' 的分析结果到数据库...")
-    pass
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        print(f"[DB] 正在保存视频 '{record.video_title}' 的分析结果到数据库...")
+        await conn.execute(
+            """
+            INSERT INTO video_analyses (video_id, video_title, category, overall_score, full_report, radar_scores_vector)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (video_id) DO UPDATE SET
+                video_title = EXCLUDED.video_title,
+                overall_score = EXCLUDED.overall_score,
+                full_report = EXCLUDED.full_report,
+                radar_scores_vector = EXCLUDED.radar_scores_vector;
+            """,
+            record.video_id,
+            record.video_title,
+            record.category,
+            record.overall_score,
+            json.dumps(record.full_report), # 将dict转为json字符串
+            record.radar_scores # asyncpg可以直接处理list
+        )
+        print(f"[DB] 视频 '{record.video_title}' 的结果已保存。")
 
 
 class WSManager:
@@ -321,15 +395,35 @@ async def diagnose_video_with_gemini(video_file: UploadFile, progress_callback: 
         
         video_title = video_file.filename or "untitled.mp4"
         print(f"视频已保存到本地临时文件: {local_tmp_path}")
-        print(f"--- 正在上传视频 '{video_title}' 到 Google AI... ---")
-        await update_progress("正在上传至AI服务", 20)
         
-        # 2. 上传文件到 Google AI
-        video_file_gai = genai.upload_file(
-            path=local_tmp_path,
-            display_name=f"short-video-diag-{video_title}",
-            mime_type=video_file.content_type
-        )
+        # 2. 上传文件到 Google AI (带重试机制)
+        upload_retries = 3
+        video_file_gai = None
+        last_exception = None
+        for attempt in range(upload_retries):
+            try:
+                print(f"--- 正在上传视频 '{video_title}' 到 Google AI... (尝试 {attempt + 1}/{upload_retries}) ---")
+                await update_progress(f"正在上传至AI服务 (尝试 {attempt + 1}/{upload_retries})", 20)
+                video_file_gai = genai.upload_file(
+                    path=local_tmp_path,
+                    display_name=f"short-video-diag-{video_title}",
+                    mime_type=video_file.content_type
+                )
+                break  # Success
+            except ssl.SSLEOFError as e:
+                print(f"[警告] 上传尝试 {attempt + 1} 因 SSL 错误失败: {e}")
+                last_exception = e
+                await asyncio.sleep(2 * (attempt + 1)) # Exponential backoff
+            except Exception as e:
+                # Catch other potential upload errors
+                print(f"[警告] 上传尝试 {attempt + 1} 失败: {e}")
+                last_exception = e
+                await asyncio.sleep(2 * (attempt + 1))
+        
+        if video_file_gai is None:
+            print(f"[严重错误] 所有 {upload_retries} 次上传尝试均失败。")
+            raise last_exception or HTTPException(status_code=500, detail="多次尝试后，上传视频到AI服务失败。")
+
         
         upload_progress = 25
         while video_file_gai.state.name == "PROCESSING":
@@ -500,11 +594,11 @@ async def process_job(job_id: str, filepath: str, original_filename: str, conten
              # 假设用户的视频总是第一个数据集
             current_scores = current_radar_data["datasets"][0].get("data", [])
 
-        # 3. 调用桩函数获取对比数据和推荐
+        # 3. 调用函数获取对比数据和推荐
         if current_scores and current_labels:
-            comparison_datasets, recommendations = find_comparable_videos(
-                current_video_scores=current_scores,
-                current_video_labels=current_labels
+            comparison_datasets, recommendations = await find_comparable_videos(
+                current_video_id=job_id,
+                current_video_scores=current_scores
             )
         else: # 如果AI未返回雷达图数据，则使用空值
             print("[警告] AI报告中未找到雷达图数据，跳过对比分析。")
@@ -523,7 +617,7 @@ async def process_job(job_id: str, filepath: str, original_filename: str, conten
         else: # 如果没有 overallReview，则创建一个
             final_report["overallReview"] = {"recommendations": recommendations.dict()}
 
-        # 5. 调用桩函数“保存”分析结果到数据库
+        # 5. 调用函数“保存”分析结果到数据库
         try:
             db_record = VideoAnalysisRecord(
                 video_id=job_id,
@@ -533,10 +627,10 @@ async def process_job(job_id: str, filepath: str, original_filename: str, conten
                 overall_score=final_report.get("overallScore", 0),
                 full_report=final_report # 存储完整的报告
             )
-            save_analysis_to_db(db_record)
+            await save_analysis_to_db(db_record)
         except Exception as db_e:
             # 确保数据库存根的错误不会中断主流程
-            print(f"[警告] 调用数据库保存存根时失败: {db_e}")
+            print(f"[警告] 调用数据库保存时失败: {db_e}")
         # --- 数据丰富逻辑结束 ---
 
         results[job_id] = final_report

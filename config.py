@@ -12,8 +12,15 @@ if not API_KEY:
     print("警告：未在環境變數中找到 GEMINI_API_KEY。請設定該變數。")
     # 您也可以在此處臨時填寫金鑰進行測試，但不建議在生產環境中使用。
     # API_KEY = "YOUR_GEMINI_API_KEY_HERE"
-    
+
 # --- The 'GEMINI_API_ENDPOINT' variable is no longer needed and will be removed. ---
+
+
+# 数据库配置
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    print("错误：未在 .env 文件或环境变量中找到 DATABASE_URL。") 
 
 # --- 2. AI 角色与任务指令 (Prompt) ---
 # 将模型名称更新为 gemini-2.5-pro
