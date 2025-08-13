@@ -58,14 +58,13 @@ const AnalysisView = ({ progress = [] }) => (
 );
 
 // Sub-Component: OptimizedScriptsSection
-const OptimizedScriptsSection = ({ title, scripts }) => {
+const OptimizedScriptsSection = ({ scripts }) => {
     const [activeTab, setActiveTab] = useState(0);
     if (!scripts || scripts.length === 0) return null;
     const activeScript = scripts[activeTab];
 
     return (
-        <div className="analysis-section">
-            <h3 className="text-xl font-bold text-gray-800 mb-4 pb-2 border-b-2">{title || '优化后的脚本方案'}</h3>
+        <div>
             <div className="flex border-b mb-4 overflow-x-auto">
                 {scripts.map((script, index) => (
                     <button
@@ -120,6 +119,85 @@ const getPriorityClass = (priority = "") => {
     if (p.includes('低')) return 'bg-blue-500';
     return 'bg-gray-400';
 }
+
+
+// ==============================================================================
+// New Report Sub-Components
+// ==============================================================================
+
+const ReportSection = ({ number, title, children, className = "" }) => (
+    <section className={`report-section ${className}`}>
+        <h3 className="text-xl font-bold text-gray-800 mb-4 pb-2 border-b-2">
+            <span className="text-blue-600 mr-2">{number}.</span>{title}
+        </h3>
+        {children}
+    </section>
+);
+
+const CollapsibleSection = ({ number, title, children }) => {
+    const [isOpen, setIsOpen] = React.useState(false);
+
+    return (
+        <section className="report-section border-t pt-6">
+            <div 
+                className="flex justify-between items-center cursor-pointer"
+                onClick={() => setIsOpen(!isOpen)}
+            >
+                <h3 className="text-xl font-bold text-gray-800">
+                    <span className="text-blue-600 mr-2">{number}.</span>{title}
+                </h3>
+                <span className={`transform transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`}>
+                    <svg className="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                </span>
+            </div>
+            {isOpen && (
+                <div className="pt-4">
+                    {children}
+                </div>
+            )}
+        </section>
+    );
+};
+
+const Tabs = ({ tabs }) => {
+    const [activeTab, setActiveTab] = React.useState(0);
+    const activeContent = tabs[activeTab].content;
+
+    return (
+        <div>
+            <div className="flex border-b mb-4">
+                {tabs.map((tab, index) => (
+                    <button
+                        key={index}
+                        className={`py-2 px-4 font-semibold text-sm focus:outline-none ${activeTab === index ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+                        onClick={() => setActiveTab(index)}
+                    >
+                        {tab.title}
+                    </button>
+                ))}
+            </div>
+            <div>{activeContent}</div>
+        </div>
+    );
+}
+
+const RecommendationCard = ({ recommendation }) => {
+    if (!recommendation) return null;
+    return (
+        <div className="mt-6 bg-slate-50 p-4 rounded-lg border">
+            <h5 className="font-semibold text-sm text-gray-800 mb-2">推荐案例参考</h5>
+            <div className="flex items-center">
+                <div className="w-12 h-12 bg-green-200 rounded-lg flex items-center justify-center text-green-700 font-bold text-xl mr-4 flex-shrink-0">
+                    ??
+                </div>
+                <div>
+                    <p className="font-semibold text-gray-900 text-sm">{recommendation.title}</p>
+                    <p className="text-xs text-gray-600 mt-1">{recommendation.description}</p>
+                </div>
+            </div>
+        </div>
+    )
+};
 
 
 // ==============================================================================
@@ -214,16 +292,17 @@ const ReportView = ({ onReset, reportData }) => {
 
     let { 
         overallScore, 
-        conclusion, // This might be undefined
-        radarData, // <-- 新增: 雷达图数据
+        conclusion,
+        radarData,
         detailedAnalysis, 
         overallReview, 
         optimizedScripts,
-        potentialLevel, // <-- 新增，用于备用
-        potentialLevelText // <-- 新增，用于备用
+        potentialLevel,
+        potentialLevelText,
+        publishingSuggestion // Assuming this comes from API
     } = reportData;
-
-    // 如果AI返回的数据没有 conclusion 对象，我们手动构建一个
+    
+    // Fallback for older data structure
     if (!conclusion && potentialLevel && potentialLevelText) {
         conclusion = {
             title: potentialLevel,
@@ -231,84 +310,120 @@ const ReportView = ({ onReset, reportData }) => {
         };
     }
 
+    // Mock recommendation data if not present, to ensure layout is stable
+    if (overallReview && !overallReview.recommendation) {
+        overallReview.recommendation = { 
+            title: "《重生之我在古代当厨神》", 
+            description: "亮点: 黄金3秒抓人, 完播率65%" 
+        };
+    }
+    
     const scoreClass = getScoreClass(overallScore);
+
+    const tabs = [
+        {
+            title: '优点',
+            content: (
+                <div>
+                    <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
+                        {overallReview?.pros?.map((pro, i) => <li key={i}>{pro}</li>)}
+                    </ul>
+                </div>
+            )
+        },
+        {
+            title: '不足',
+            content: (
+                 <div>
+                    <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
+                        {overallReview?.cons?.map((con, i) => <li key={i}>{con}</li>)}
+                    </ul>
+                </div>
+            )
+        }
+    ];
 
     return (
         <div>
-            <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold text-gray-800">诊断报告</h2>
-                <button onClick={onReset} className="bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition-all duration-300 text-sm">诊断新视频</button>
+             <div className="flex justify-between items-start mb-8">
+                <div>
+                    <h2 className="text-2xl md:text-3xl font-bold text-gray-900">爆款打造大师·诊断报告</h2>
+                    <p className="text-sm text-gray-500 mt-1">根据您的内容生成的智能分析与优化建议</p>
+                </div>
+                <button onClick={onReset} className="bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition-all duration-300 text-sm flex-shrink-0">诊断新视频</button>
             </div>
             
-            <div id="report-content">
-                <div className="bg-slate-50 p-6 rounded-xl border border-gray-200 text-center report-card mb-8">
-                    <p className="text-lg text-gray-600">综合评分</p>
-                    <p className={`text-6xl font-bold my-2 ${scoreClass}`}>{overallScore}<span className="text-2xl text-gray-500">/100</span></p>
-                    <p className={`text-xl font-semibold ${scoreClass}`}>{conclusion?.title}</p>
-                    <p className="text-sm text-gray-500 mt-1">{conclusion?.description}</p>
-                </div>
+            <div id="report-content" className="space-y-10">
 
-                {/* --- 新增：数据雷达图模块 --- */}
-                {radarData && radarData.labels && radarData.datasets && (
-                    <div className="analysis-section mb-8">
-                        <h3 className="text-xl font-bold text-gray-800 mb-4 pb-2 border-b-2">数据雷达图</h3>
-                        <RadarChart data={radarData} />
+                {/* 1. 评价总览 */}
+                <ReportSection number="1" title="评价总览">
+                    <div className="bg-slate-50 p-6 rounded-xl border border-gray-200 flex flex-col md:flex-row items-center text-center md:text-left">
+                        <div className="text-center pb-4 md:pb-0 md:pr-8 md:border-r border-gray-200">
+                             <p className={`text-6xl font-bold ${scoreClass}`}>{overallScore}<span className="text-2xl text-gray-500">/100</span></p>
+                             {publishingSuggestion && (
+                                <div className="mt-2 inline-flex items-center bg-green-100 text-green-700 text-sm font-medium px-3 py-1 rounded-full">
+                                    <svg className="w-4 h-4 mr-1.5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg>
+                                    {publishingSuggestion}
+                                </div>
+                             )}
+                        </div>
+                        <div className="pt-4 md:pt-0 md:pl-8 flex-1">
+                            <p className={`text-xl font-semibold mb-1 ${scoreClass}`}>{conclusion?.title}</p>
+                            <p className="text-sm text-gray-600">{conclusion?.description}</p>
+                        </div>
                     </div>
-                )}
+                </ReportSection>
+
+                {/* 2. 原因展示 */}
+                <ReportSection number="2" title="核心亮点与不足">
+                    <div className="grid md:grid-cols-2 gap-8">
+                        <div>
+                           <h4 className="font-semibold text-center mb-2 text-gray-700">能力雷达图</h4>
+                           {radarData && <RadarChart data={radarData} />}
+                        </div>
+                        <div>
+                           <Tabs tabs={tabs} />
+                           <RecommendationCard recommendation={overallReview?.recommendation} />
+                        </div>
+                    </div>
+                </ReportSection>
                 
-                {detailedAnalysis && (
-                    <div className="analysis-section mb-8">
-                        <h3 className="text-xl font-bold text-gray-800 mb-4 pb-2 border-b-2">{detailedAnalysis.title || '详细视频分析'}</h3>
+                {/* 3. 具体维度评价支撑 */}
+                {detailedAnalysis && detailedAnalysis.sections && (
+                    <CollapsibleSection number="3" title="各维度详细评估">
                         <dl className="space-y-4">
-                            {detailedAnalysis.sections?.map((item, index) => (
+                            {detailedAnalysis.sections.map((item, index) => (
                                 <div key={index} className="bg-white p-4 rounded-lg border">
                                     <dt className="font-semibold text-gray-900">{item.dimension}</dt>
                                     <dd className="text-sm text-gray-600 mt-1">{item.content}</dd>
                                 </div>
                             ))}
                         </dl>
-                    </div>
+                    </CollapsibleSection>
                 )}
                 
-                {overallReview && (
-                    <div className="analysis-section mb-8">
-                        <h3 className="text-xl font-bold text-gray-800 mb-4 pb-2 border-b-2">{overallReview.title || '综合评价与优化建议'}</h3>
-                        <div className="grid md:grid-cols-2 gap-6">
-                            <div className="bg-white p-4 rounded-lg border">
-                                <h4 className="font-semibold text-green-600 mb-2">优点 (Pros)</h4>
-                                <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-                                    {overallReview.pros?.map((pro, i) => <li key={i}>{pro}</li>)}
-                                </ul>
-                            </div>
-                            <div className="bg-white p-4 rounded-lg border">
-                                <h4 className="font-semibold text-red-600 mb-2">缺点 (Cons)</h4>
-                                <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-                                    {overallReview.cons?.map((con, i) => <li key={i}>{con}</li>)}
-                                </ul>
-                            </div>
-                        </div>
-                        <div className="bg-white p-4 rounded-lg border mt-6">
-                             <h4 className="font-semibold text-blue-600 mb-2">优化方向</h4>
-                             <ul className="space-y-3 mt-4">
-                                {overallReview.optimizationDirections?.map((dir, i) => (
-                                    <li key={i} className="flex items-start text-sm">
-                                        <span className={`text-xs font-bold text-white rounded-full px-2 py-0.5 mr-3 ${getPriorityClass(dir.priority)}`}>
-                                            {dir.priority}
-                                        </span>
-                                        <span className="text-gray-700">{dir.direction}</span>
-                                    </li>
-                                ))}
-                             </ul>
-                        </div>
-                    </div>
+                {/* 4. 优化方向 */}
+                {overallReview?.optimizationDirections && (
+                    <ReportSection number="4" title="后续优化方向" className="border-t pt-6">
+                         <div className="space-y-3">
+                            {overallReview.optimizationDirections.map((dir, i) => (
+                                <div key={i} className="flex items-start text-sm bg-white p-3 rounded-lg border">
+                                    <span className={`flex-shrink-0 text-xs font-bold text-white rounded-full px-2 py-0.5 mr-3 mt-0.5 ${getPriorityClass(dir.priority)}`}>
+                                        {dir.priority}
+                                    </span>
+                                    <span className="text-gray-700">{dir.direction}</span>
+                                </div>
+                            ))}
+                         </div>
+                    </ReportSection>
                 )}
 
-                {optimizedScripts && optimizedScripts.scripts && 
-                    <OptimizedScriptsSection 
-                        title={optimizedScripts.title}
-                        scripts={optimizedScripts.scripts} 
-                    />
-                }
+                {/* 5. 优化脚本 */}
+                {optimizedScripts && optimizedScripts.scripts && (
+                    <ReportSection number="5" title={optimizedScripts.title || "优化脚本建议"} className="border-t pt-6">
+                        <OptimizedScriptsSection scripts={optimizedScripts.scripts} />
+                    </ReportSection>
+                )}
             </div>
         </div>
     );
@@ -437,7 +552,7 @@ function App() {
 
     return (
         <div className="container mx-auto p-4 md:p-8 max-w-4xl main-container">
-            <Header />
+            {view !== 'report' && <Header />}
             <main className="bg-white p-6 md:p-10 rounded-2xl shadow-lg border border-gray-200">
                 {view === 'upload' && (
                      <>

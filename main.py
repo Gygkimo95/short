@@ -45,7 +45,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # 允许所有来源的CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://10.186.60.38:8000", "http://your-frontend-origin"],  # 调整
+    allow_origins=["*"],  # 允许所有来源，方便本地开发
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
