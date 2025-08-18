@@ -483,7 +483,7 @@ function App() {
             formData.append('video', selectedFile, selectedFile.name);
 
             // 1) 上传，后端快速返回 jobId，实际处理在后台进行
-            const res = await fetch('http://10.186.60.38:8000/diagnose', {
+            const res = await fetch('/diagnose', {
                 method: 'POST',
                 body: formData,
             });
@@ -509,7 +509,7 @@ function App() {
                         setProgress((prev) => [...prev, { message: msg.message, percent: msg.percent }]);
                     } else if (msg.type === 'done') {
                         // 3) 取最终报告并展示
-                        const r = await fetch(`http://10.186.60.38:8000/diagnose/${encodeURIComponent(newJobId)}/result`);
+                        const r = await fetch(`/diagnose/${encodeURIComponent(newJobId)}/result`);
                         if (!r.ok) throw new Error('获取报告失败');
                         const data = await r.json();
                         setReportData(data);
